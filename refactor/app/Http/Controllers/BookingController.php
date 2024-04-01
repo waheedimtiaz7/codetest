@@ -2,9 +2,11 @@
 
 namespace DTApi\Http\Controllers;
 
+use App\Http\Requests\StoreJobRequest;
 use DTApi\Models\Job;
 use DTApi\Http\Requests;
 use DTApi\Models\Distance;
+use DTApi\Traits\ResponseTrait;
 use Illuminate\Http\Request;
 use DTApi\Repository\BookingRepository;
 
@@ -14,7 +16,7 @@ use DTApi\Repository\BookingRepository;
  */
 class BookingController extends Controller
 {
-
+    use ResponseTrait;
     /**
      * @var BookingRepository
      */
@@ -29,23 +31,26 @@ class BookingController extends Controller
         $this->repository = $bookingRepository;
     }
 
+    protected function isAdmin($user)
+    {
+        return in_array($user->user_type, [env('ADMIN_ROLE_ID'), env('SUPERADMIN_ROLE_ID')]);
+    }
     /**
      * @param Request $request
      * @return mixed
      */
     public function index(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
 
-            $response = $this->repository->getUsersJobs($user_id);
-
+        if ($userId = $request->get('user_id')) {
+            $data = $this->repository->getUsersJobs($userId);
+            return $this->generateResponse(true, 'User jobs fetched successfully.', $data);
+        } elseif ($this->isAdmin($request->__authenticatedUser)) {
+            $data = $this->repository->getAll($request);
+            return $this->generateResponse(true, 'All jobs fetched successfully for admin.', $data);
         }
-        elseif($request->__authenticatedUser->user_type == env('ADMIN_ROLE_ID') || $request->__authenticatedUser->user_type == env('SUPERADMIN_ROLE_ID'))
-        {
-            $response = $this->repository->getAll($request);
-        }
 
-        return response($response);
+        return $this->generateResponse(false, 'No valid action found.', null);
     }
 
     /**
@@ -63,14 +68,20 @@ class BookingController extends Controller
      * @param Request $request
      * @return mixed
      */
-    public function store(Request $request)
+    public function store(StoreJobRequest $request)
     {
-        $data = $request->all();
+        $user = auth()->user(); // or any method to get the current user
 
-        $response = $this->repository->store($request->__authenticatedUser, $data);
+        if ($user->user_type != env('CUSTOMER_ROLE_ID')) {
+            return $this->generateResponse('fail', 'Translator cannot create booking');
+        }
 
-        return response($response);
+        // Proceed with storing the job using the validated data
+        $data = $request->validated();
 
+        $response = $this->repository->store(auth()->user(), $data);
+
+        return $this->generateResponse('success', 'Job created successfully', $response);
     }
 
     /**
@@ -194,64 +205,35 @@ class BookingController extends Controller
 
     public function distanceFeed(Request $request)
     {
-        $data = $request->all();
+        $validated = $request->validate([
+            'distance' => 'sometimes|string',
+            'time' => 'sometimes|string',
+            'jobid' => 'required|exists:jobs,id',
+            'session_time' => 'sometimes|string',
+            'flagged' => 'sometimes|boolean',
+            'manually_handled' => 'sometimes|boolean',
+            'by_admin' => 'sometimes|boolean',
+            'admincomment' => 'required_if:flagged,true|string',
+        ]);
 
-        if (isset($data['distance']) && $data['distance'] != "") {
-            $distance = $data['distance'];
-        } else {
-            $distance = "";
-        }
-        if (isset($data['time']) && $data['time'] != "") {
-            $time = $data['time'];
-        } else {
-            $time = "";
-        }
-        if (isset($data['jobid']) && $data['jobid'] != "") {
-            $jobid = $data['jobid'];
-        }
-
-        if (isset($data['session_time']) && $data['session_time'] != "") {
-            $session = $data['session_time'];
-        } else {
-            $session = "";
+        // Update Distance if applicable
+        if ($validated['distance'] || $validated['time']) {
+            Distance::updateOrCreate(
+                ['job_id' => $validated['jobid']],
+                ['distance' => $validated['distance'] ?? '', 'time' => $validated['time'] ?? '']
+            );
         }
 
-        if ($data['flagged'] == 'true') {
-            if($data['admincomment'] == '') return "Please, add comment";
-            $flagged = 'yes';
-        } else {
-            $flagged = 'no';
-        }
-        
-        if ($data['manually_handled'] == 'true') {
-            $manually_handled = 'yes';
-        } else {
-            $manually_handled = 'no';
-        }
+        // Update Job with relevant fields
+        Job::where('id', $validated['jobid'])->update([
+            'admin_comments' => $validated['admincomment'] ?? '',
+            'flagged' => $request->boolean('flagged') ? 'yes' : 'no',
+            'session_time' => $validated['session_time'] ?? '',
+            'manually_handled' => $request->boolean('manually_handled') ? 'yes' : 'no',
+            'by_admin' => $request->boolean('by_admin') ? 'yes' : 'no',
+        ]);
 
-        if ($data['by_admin'] == 'true') {
-            $by_admin = 'yes';
-        } else {
-            $by_admin = 'no';
-        }
-
-        if (isset($data['admincomment']) && $data['admincomment'] != "") {
-            $admincomment = $data['admincomment'];
-        } else {
-            $admincomment = "";
-        }
-        if ($time || $distance) {
-
-            $affectedRows = Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
-        }
-
-        if ($admincomment || $session || $flagged || $manually_handled || $by_admin) {
-
-            $affectedRows1 = Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
-
-        }
-
-        return response('Record updated!');
+        return $this->generateResponse('success', 'Job updated successfully',);
     }
 
     public function reopen(Request $request)
